@@ -1,0 +1,71 @@
+name: build (windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        arch: [ "Win32", "x64" ]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Prepare build dir
+        run: mkdir build_${{ matrix.arch }}
+
+      - name: Determine parent folder and clone dependencies
+        shell: pwsh
+        run: |
+          $cwd = $env:GITHUB_WORKSPACE
+          if (-not $cwd) { Write-Host "GITHUB_WORKSPACE not set"; exit 1 }
+          $parent = Split-Path -Parent $cwd
+          Write-Host "Parent folder: $parent"
+          $repos = @{
+            "ncbind" = "https://github.com/wamsoft/ncbind.git"
+            "tp_stub" = "https://github.com/wamsoft/tp_stub.git"
+          }
+          foreach ($name in $repos.Keys) {
+            $url = $repos[$name]
+            $dest = Join-Path $parent $name
+            Write-Host "`n--- Preparing $name at $dest ---"
+            if (Test-Path $dest) {
+              Write-Host "Removing existing $dest"
+              Remove-Item -Recurse -Force $dest
+            }
+            Write-Host "Cloning $url -> $dest"
+            git clone $url $dest
+            if ($LASTEXITCODE -ne 0) { Write-Host "git clone failed for $name"; exit 1 }
+            Write-Host "Initializing submodules (if any) for $name"
+            git -C $dest submodule update --init --recursive
+            if ($LASTEXITCODE -ne 0) { Write-Host "submodule init failed for $name (continuing)"; }
+            Write-Host "$name ready."
+          }
+          Write-Host "`nParent directory contents (sanity):"
+          Get-ChildItem -Path $parent -Force | ForEach-Object { Write-Host $_.Name }
+
+      - name: Configure (CMake)
+        shell: bash
+        run: |
+          cmake -S . -B build_${{ matrix.arch }} -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (Release)
+        run: cmake --build build_${{ matrix.arch }} --config Release --parallel
+
+      - name: Collect plugin artifact
+        run: |
+          mkdir -p artifacts/${{ matrix.arch }}
+          # try common output locations; adjust if your CMakeLists emits DLL elsewhere
+          cp build_${{ matrix.arch }}/Release/scriptsEx.dll artifacts/${{ matrix.arch }}/ || true
+          cp build_${{ matrix.arch }}/Release/*.dll artifacts/${{ matrix.arch }}/ || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: scriptsEx-${{ matrix.arch }}
+          path: artifacts/${{ matrix.arch }}
